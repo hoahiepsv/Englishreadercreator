@@ -44,6 +44,7 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
   
   // Trimmer State
   const rulerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null); // For Waveform
   const audioPreviewRef = useRef<HTMLAudioElement>(null);
   const [isDragging, setIsDragging] = useState<'start' | 'end' | null>(null);
 
@@ -111,6 +112,80 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
           audio.removeEventListener('ended', handleEnded);
       };
   }, [isPlayingPreview, segment.trimStart, segment.trimEnd]);
+
+  // --- Waveform Rendering Logic ---
+  useEffect(() => {
+    if (!showTrimmer || !audioSrc || !canvasRef.current) return;
+
+    const drawWaveform = async () => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        // Reset canvas
+        const width = canvas.offsetWidth;
+        const height = canvas.offsetHeight;
+        canvas.width = width;
+        canvas.height = height;
+        ctx.clearRect(0, 0, width, height);
+
+        // Show loading state roughly
+        ctx.fillStyle = "#e2e8f0";
+        ctx.fillRect(0, height/2 - 1, width, 2);
+
+        try {
+            // Fetch and decode audio data
+            const response = await fetch(audioSrc);
+            const arrayBuffer = await response.arrayBuffer();
+            const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+            // Draw
+            const channelData = audioBuffer.getChannelData(0);
+            const step = Math.ceil(channelData.length / width);
+            const amp = height / 2;
+            
+            ctx.fillStyle = '#60a5fa'; // Primary-400 (Blue)
+
+            for (let i = 0; i < width; i++) {
+                let min = 1.0;
+                let max = -1.0;
+                for (let j = 0; j < step; j++) {
+                    const datum = channelData[i * step + j];
+                    if (datum < min) min = datum;
+                    if (datum > max) max = datum;
+                }
+                
+                // Prevent flat lines
+                if (max === min) {
+                    min = -0.01;
+                    max = 0.01;
+                }
+                
+                // Draw bar
+                const y = (1 + min) * amp;
+                const h = Math.max(1, (max - min) * amp);
+                ctx.fillRect(i, y, 1, h);
+            }
+            
+            // Close context to save memory
+            audioCtx.close();
+
+        } catch (e) {
+            console.error("Failed to draw waveform", e);
+        }
+    };
+
+    drawWaveform();
+
+    // Re-draw on resize
+    const resizeObserver = new ResizeObserver(() => drawWaveform());
+    if (canvasRef.current) resizeObserver.observe(canvasRef.current);
+    return () => resizeObserver.disconnect();
+
+  }, [showTrimmer, audioSrc]);
+
 
   // Handle OCR/Text Input File
   const handleOcrFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -508,27 +583,26 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
                                      <div 
                                         ref={rulerRef}
                                         onClick={handleRulerSeek}
-                                        className="relative h-12 bg-slate-200 rounded-md mb-3 select-none touch-none overflow-hidden cursor-crosshair group/ruler"
+                                        className="relative h-16 bg-slate-100 rounded-md mb-3 select-none touch-none overflow-hidden cursor-crosshair group/ruler border border-slate-300"
                                         title="Click to seek"
                                      >
-                                         {/* Ticks (Visual) */}
-                                         <div className="absolute inset-0 flex justify-between px-1 opacity-20 pointer-events-none">
-                                             {Array.from({ length: 11 }).map((_, i) => (
-                                                 <div key={i} className="w-px h-full bg-slate-800" />
-                                             ))}
-                                         </div>
+                                         {/* WAVEFORM CANVAS */}
+                                         <canvas 
+                                            ref={canvasRef}
+                                            className="absolute inset-0 w-full h-full pointer-events-none opacity-80"
+                                         />
 
-                                         {/* Unselected Regions (Dimmed) */}
-                                         <div className="absolute inset-y-0 left-0 bg-slate-800/10 pointer-events-none" style={{ width: `${startPct}%` }} />
-                                         <div className="absolute inset-y-0 right-0 bg-slate-800/10 pointer-events-none" style={{ width: `${100 - endPct}%` }} />
+                                         {/* Unselected Regions (Dimmed Overlay) */}
+                                         <div className="absolute inset-y-0 left-0 bg-slate-900/40 pointer-events-none z-10" style={{ width: `${startPct}%` }} />
+                                         <div className="absolute inset-y-0 right-0 bg-slate-900/40 pointer-events-none z-10" style={{ width: `${100 - endPct}%` }} />
 
-                                         {/* Selected Region */}
+                                         {/* Selected Region Highlight */}
                                          <div 
-                                            className="absolute inset-y-0 bg-primary-500/20 border-x-2 border-primary-500 pointer-events-none"
+                                            className="absolute inset-y-0 border-x-2 border-primary-500 pointer-events-none z-10"
                                             style={{ left: `${startPct}%`, width: `${widthPct}%` }}
                                          />
 
-                                         {/* Playhead (New) */}
+                                         {/* Playhead */}
                                          <div 
                                             className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-30 pointer-events-none transition-all duration-75 ease-linear shadow-[0_0_4px_rgba(255,0,0,0.5)]"
                                             style={{ left: `${playheadPct}%` }}
@@ -547,7 +621,9 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
                                             onTouchStart={(e) => { e.stopPropagation(); setIsDragging('start'); }}
                                             onClick={(e) => e.stopPropagation()}
                                          >
-                                             <div className="h-8 w-1.5 bg-primary-600 rounded-full shadow-sm ring-2 ring-white" />
+                                             <div className="h-10 w-4 bg-primary-600 rounded shadow-md ring-2 ring-white flex items-center justify-center">
+                                                 <div className="w-0.5 h-4 bg-white/50 rounded-full" />
+                                             </div>
                                          </div>
 
                                          {/* End Handle */}
@@ -558,7 +634,9 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
                                             onTouchStart={(e) => { e.stopPropagation(); setIsDragging('end'); }}
                                             onClick={(e) => e.stopPropagation()}
                                          >
-                                             <div className="h-8 w-1.5 bg-primary-600 rounded-full shadow-sm ring-2 ring-white" />
+                                             <div className="h-10 w-4 bg-primary-600 rounded shadow-md ring-2 ring-white flex items-center justify-center">
+                                                <div className="w-0.5 h-4 bg-white/50 rounded-full" />
+                                             </div>
                                          </div>
                                      </div>
 
