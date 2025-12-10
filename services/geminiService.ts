@@ -1,19 +1,21 @@
 import { GoogleGenAI, Modality } from "@google/genai";
 import { VoiceName } from '../types';
 
-const getClient = () => {
-    const apiKey = process.env.API_KEY;
-    if (!apiKey) {
-        throw new Error("API Key is missing.");
+const getClient = (apiKey?: string) => {
+    // Prioritize user-provided key, fallback to env var
+    const key = apiKey || process.env.API_KEY;
+    if (!key) {
+        throw new Error("API Key is missing. Please enter your Gemini API Key.");
     }
-    return new GoogleGenAI({ apiKey });
+    return new GoogleGenAI({ apiKey: key });
 }
 
 export const extractTextFromMedia = async (
   base64Data: string,
-  mimeType: string
+  mimeType: string,
+  apiKey?: string
 ): Promise<string> => {
-  const ai = getClient();
+  const ai = getClient(apiKey);
   
   // Use Flash for fast OCR/Extraction
   const response = await ai.models.generateContent({
@@ -38,9 +40,10 @@ export const extractTextFromMedia = async (
 
 export const generateSpeech = async (
     text: string, 
-    voice: VoiceName
+    voice: VoiceName,
+    apiKey?: string
 ): Promise<string> => {
-    const ai = getClient();
+    const ai = getClient(apiKey);
 
     // Use TTS preview model
     const response = await ai.models.generateContent({
