@@ -10,6 +10,7 @@ interface SegmentItemProps {
   onChange: (id: string, updates: Partial<Segment>) => void;
   onRemove: (id: string) => void;
   index: number;
+  apiKey: string; // Add apiKey prop
 }
 
 // Extended voice presets using Speed/Pitch shifting
@@ -35,7 +36,7 @@ const VOICE_PRESETS = [
     ]}
 ];
 
-const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, index }) => {
+const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, index, apiKey }) => {
   const [isProcessingDownload, setIsProcessingDownload] = useState(false);
   const [showTrimmer, setShowTrimmer] = useState(false);
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
@@ -116,6 +117,11 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
     const file = e.target.files?.[0];
     if (!file) return;
 
+    if (!apiKey) {
+        onChange(segment.id, { error: "Please enter your API Key at the top of the page first." });
+        return;
+    }
+
     const reader = new FileReader();
     reader.onloadend = async () => {
         const base64String = reader.result as string;
@@ -129,7 +135,7 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
         });
 
         try {
-            const extracted = await extractTextFromMedia(base64Data, file.type);
+            const extracted = await extractTextFromMedia(base64Data, file.type, apiKey);
             onChange(segment.id, { isExtracting: false, textRaw: extracted });
         } catch (err: any) {
             onChange(segment.id, { isExtracting: false, error: `Extraction failed: ${err.message}` });
@@ -170,6 +176,11 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
   };
 
   const handleGenerateAudio = async () => {
+    if (!apiKey) {
+        onChange(segment.id, { error: "Please enter your API Key at the top of the page first." });
+        return;
+    }
+
     if (!segment.textRaw.trim()) {
         onChange(segment.id, { error: "Please enter some text first." });
         return;
@@ -178,7 +189,7 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
     onChange(segment.id, { isGeneratingAudio: true, error: undefined, audioBase64: null });
 
     try {
-        const audioData = await generateSpeech(segment.textRaw, segment.voice);
+        const audioData = await generateSpeech(segment.textRaw, segment.voice, apiKey);
         onChange(segment.id, { isGeneratingAudio: false, audioBase64: audioData });
     } catch (err: any) {
         onChange(segment.id, { isGeneratingAudio: false, error: `TTS failed: ${err.message}` });
@@ -636,7 +647,8 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
                 {segment.inputType !== InputType.AUDIO && (
                     <button
                         onClick={handleGenerateAudio}
-                        disabled={segment.isGeneratingAudio || !segment.textRaw}
+                        disabled={segment.isGeneratingAudio || !segment.textRaw || !apiKey}
+                        title={!apiKey ? "Enter API Key first" : ""}
                         className="w-full py-2.5 px-4 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-sm transition-all active:scale-95"
                     >
                         {segment.isGeneratingAudio ? (
