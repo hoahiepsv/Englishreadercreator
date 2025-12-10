@@ -1,10 +1,11 @@
 
+
 import React, { useState, useRef, useEffect } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { Segment, InputType, VoiceName } from './types';
 import SegmentItem from './components/SegmentItem';
 import { Plus, Download, Play, Layers, AlertCircle, Loader2, RotateCcw } from 'lucide-react';
-import { decodeRawPCM, mergeAudioBuffers, bufferToWav, resampleAudioBuffer } from './utils/audioUtils';
+import { decodeRawPCM, mergeAudioBuffers, bufferToWav, resampleAudioBuffer, convertSampleRate, trimAudioBuffer } from './utils/audioUtils';
 
 const App: React.FC = () => {
   const [segments, setSegments] = useState<Segment[]>([
@@ -85,7 +86,17 @@ const App: React.FC = () => {
             if (seg.inputType === InputType.AUDIO && seg.uploadedAudioURL) {
                  const response = await fetch(seg.uploadedAudioURL);
                  const arrayBuffer = await response.arrayBuffer();
-                 buffer = await audioContext.decodeAudioData(arrayBuffer);
+                 // Decode might return varying sample rates (44.1k, 48k)
+                 const decoded = await audioContext.decodeAudioData(arrayBuffer);
+                 
+                 // Apply Trimming if set
+                 let processed = decoded;
+                 if (seg.trimStart !== undefined && seg.trimEnd !== undefined) {
+                     processed = trimAudioBuffer(decoded, seg.trimStart, seg.trimEnd);
+                 }
+
+                 // Normalize to 24000Hz to match Gemini TTS output for clean merging
+                 buffer = await convertSampleRate(processed, 24000);
             } 
             // Case B: Gemini Generated (Raw PCM)
             else if (seg.audioBase64) {
@@ -162,6 +173,7 @@ const App: React.FC = () => {
             <ul className="list-disc list-inside text-slate-600 space-y-1 text-sm">
                 <li>Choose <strong>Direct Text</strong>, <strong>Image/PDF</strong>, or <strong>Upload Audio</strong> for each segment.</li>
                 <li>For Text: Pick a voice persona (Child, Adult, Elder) and generate.</li>
+                <li>For Audio: Upload a file and use the <strong>Edit Length</strong> tool to trim start/end times if needed.</li>
                 <li>Set the <strong>Delay</strong> to control silence after the segment.</li>
                 <li>Click <strong>Preview All</strong> to merge and listen, then Download.</li>
             </ul>

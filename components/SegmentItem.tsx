@@ -1,9 +1,9 @@
 
-import React, { useMemo, useEffect, useState } from 'react';
+import React, { useMemo, useEffect, useState, useRef } from 'react';
 import { Segment, InputType, VoiceName } from '../types';
 import { extractTextFromMedia, generateSpeech } from '../services/geminiService';
-import { Trash2, FileText, Type, Upload, Music, Loader2, Download, PlayCircle, Clock } from 'lucide-react';
-import { base64ToUint8Array, createWavHeader } from '../utils/audioUtils';
+import { Trash2, FileText, Type, Upload, Music, Loader2, Download, PlayCircle, Clock, Scissors, Pause, Play, RotateCcw } from 'lucide-react';
+import { base64ToUint8Array, createWavHeader, decodeRawPCM, resampleAudioBuffer, bufferToWav, trimAudioBuffer } from '../utils/audioUtils';
 
 interface SegmentItemProps {
   segment: Segment;
@@ -36,10 +36,17 @@ const VOICE_PRESETS = [
 ];
 
 const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, index }) => {
+  const [isProcessingDownload, setIsProcessingDownload] = useState(false);
+  const [showTrimmer, setShowTrimmer] = useState(false);
+  const [isPlayingPreview, setIsPlayingPreview] = useState(false);
+  const [currentPlayTime, setCurrentPlayTime] = useState(0); // For visual playhead
   
+  // Trimmer State
+  const rulerRef = useRef<HTMLDivElement>(null);
+  const audioPreviewRef = useRef<HTMLAudioElement>(null);
+  const [isDragging, setIsDragging] = useState<'start' | 'end' | null>(null);
+
   // 1. Handle Audio Source for Playback
-  // If it's a Gemini TTS result (Raw PCM), we need to wrap it in WAV.
-  // If it's an uploaded Audio File, we use the object URL directly.
   const audioSrc = useMemo(() => {
     if (segment.inputType === InputType.AUDIO && segment.uploadedAudioURL) {
         return segment.uploadedAudioURL;
@@ -48,7 +55,6 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
     if (segment.audioBase64) {
         try {
             const pcmData = base64ToUint8Array(segment.audioBase64);
-            // Apply header for preview
             const header = createWavHeader(pcmData.length);
             const wavData = new Uint8Array(header.length + pcmData.length);
             wavData.set(header);
@@ -67,11 +73,43 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
   useEffect(() => {
       return () => {
           if (audioSrc && !segment.uploadedAudioURL) {
-               // Only revoke generated blobs, not user file uploads managed elsewhere (though cleaner to revoke all)
                URL.revokeObjectURL(audioSrc);
           }
       }
   }, [audioSrc]);
+
+  // Monitor preview playback for trimming limits and Update Playhead
+  useEffect(() => {
+      const audio = audioPreviewRef.current;
+      if (!audio) return;
+
+      const handleTimeUpdate = () => {
+          setCurrentPlayTime(audio.currentTime);
+
+          // Only enforce trim end if we are in "Preview Mode" (playing)
+          // Use a small buffer (0.1s) to prevent loop glitches
+          if (isPlayingPreview && segment.trimEnd !== undefined) {
+              if (audio.currentTime >= segment.trimEnd) {
+                  audio.pause();
+                  setIsPlayingPreview(false);
+                  audio.currentTime = segment.trimStart || 0;
+              }
+          }
+      };
+
+      const handleEnded = () => {
+          setIsPlayingPreview(false);
+          audio.currentTime = segment.trimStart || 0;
+      };
+
+      audio.addEventListener('timeupdate', handleTimeUpdate);
+      audio.addEventListener('ended', handleEnded);
+      
+      return () => {
+          audio.removeEventListener('timeupdate', handleTimeUpdate);
+          audio.removeEventListener('ended', handleEnded);
+      };
+  }, [isPlayingPreview, segment.trimStart, segment.trimEnd]);
 
   // Handle OCR/Text Input File
   const handleOcrFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -100,18 +138,35 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
     reader.readAsDataURL(file);
   };
 
-  // Handle Audio File Upload
+  // Handle Audio File Upload and Get Duration
   const handleAudioFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
 
       const url = URL.createObjectURL(file);
-      onChange(segment.id, {
-          fileName: file.name,
-          audioBase64: "FILE", // Marker to know we have a file
-          uploadedAudioURL: url,
-          error: undefined
-      });
+      const tempAudio = new Audio(url);
+      
+      tempAudio.onloadedmetadata = () => {
+          onChange(segment.id, {
+              fileName: file.name,
+              audioBase64: "FILE", 
+              uploadedAudioURL: url,
+              error: undefined,
+              duration: tempAudio.duration,
+              trimStart: 0,
+              trimEnd: tempAudio.duration
+          });
+      };
+      
+      // Fallback if metadata fails to load quickly
+      tempAudio.onerror = () => {
+           onChange(segment.id, {
+              fileName: file.name,
+              audioBase64: "FILE", 
+              uploadedAudioURL: url,
+              error: "Could not load audio metadata."
+          });
+      };
   };
 
   const handleGenerateAudio = async () => {
@@ -130,14 +185,151 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
     }
   };
 
-  const handleDownloadSingle = () => {
-      if (!audioSrc) return;
-      const link = document.createElement("a");
-      link.href = audioSrc;
-      link.download = `segment_${index + 1}.wav`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+  const handleDownloadSingle = async () => {
+    if (segment.inputType === InputType.AUDIO && segment.uploadedAudioURL) {
+        // For uploaded files, if trimmed, we need to process it first
+        if (segment.trimStart !== undefined && segment.trimEnd !== undefined && segment.duration && (segment.trimStart > 0 || segment.trimEnd < segment.duration)) {
+             setIsProcessingDownload(true);
+             try {
+                const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+                const response = await fetch(segment.uploadedAudioURL);
+                const arrayBuffer = await response.arrayBuffer();
+                const decoded = await audioContext.decodeAudioData(arrayBuffer);
+                const trimmed = trimAudioBuffer(decoded, segment.trimStart, segment.trimEnd);
+                
+                const wavBlob = bufferToWav(trimmed);
+                const url = URL.createObjectURL(wavBlob);
+                
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = `trimmed_${segment.fileName || 'audio.wav'}`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                setTimeout(() => URL.revokeObjectURL(url), 100);
+             } catch(e) {
+                 console.error(e);
+             } finally {
+                 setIsProcessingDownload(false);
+             }
+             return;
+        }
+
+        const link = document.createElement("a");
+        link.href = segment.uploadedAudioURL;
+        link.download = segment.fileName || `segment_${index + 1}.mp3`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        return;
+    }
+
+    if (segment.audioBase64) {
+        setIsProcessingDownload(true);
+        try {
+            const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+            const rawBuffer = await decodeRawPCM(segment.audioBase64, audioContext);
+            const processedBuffer = await resampleAudioBuffer(rawBuffer, segment.speed);
+            const wavBlob = bufferToWav(processedBuffer);
+            const url = URL.createObjectURL(wavBlob);
+            
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `segment_${index + 1}_${segment.voice}.wav`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            setTimeout(() => URL.revokeObjectURL(url), 100);
+        } catch (e) {
+            console.error("Download processing failed", e);
+            onChange(segment.id, { error: "Failed to prepare download." });
+        } finally {
+            setIsProcessingDownload(false);
+        }
+    }
+  };
+
+  // --- Trimming Logic ---
+  
+  // Seek Handler (Click on Ruler)
+  const handleRulerSeek = (e: React.MouseEvent) => {
+    if (!rulerRef.current || !segment.duration || !audioPreviewRef.current) return;
+    
+    // Don't seek if dragging handles
+    if (isDragging) return;
+
+    const rect = rulerRef.current.getBoundingClientRect();
+    const clientX = e.clientX;
+    let percentage = (clientX - rect.left) / rect.width;
+    percentage = Math.max(0, Math.min(1, percentage));
+    
+    const newTime = percentage * segment.duration;
+    
+    // Update Audio Position
+    audioPreviewRef.current.currentTime = newTime;
+    setCurrentPlayTime(newTime);
+  };
+
+  useEffect(() => {
+    const handleUp = () => setIsDragging(null);
+    const handleMove = (e: MouseEvent | TouchEvent) => {
+        if(isDragging) {
+            if (!rulerRef.current || !segment.duration) return;
+            const rect = rulerRef.current.getBoundingClientRect();
+            // @ts-ignore
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            let percentage = (clientX - rect.left) / rect.width;
+            percentage = Math.max(0, Math.min(1, percentage));
+            const newTime = percentage * segment.duration;
+            
+            if (isDragging === 'start') {
+                const currentEnd = segment.trimEnd ?? segment.duration;
+                if (newTime < currentEnd - 0.5) { 
+                    onChange(segment.id, { trimStart: newTime });
+                }
+            } else if (isDragging === 'end') {
+                const currentStart = segment.trimStart ?? 0;
+                if (newTime > currentStart + 0.5) {
+                    onChange(segment.id, { trimEnd: newTime });
+                }
+            }
+        }
+    }
+
+    if (isDragging) {
+        window.addEventListener('mouseup', handleUp);
+        window.addEventListener('mousemove', handleMove);
+        window.addEventListener('touchend', handleUp);
+        window.addEventListener('touchmove', handleMove);
+    }
+    return () => {
+        window.removeEventListener('mouseup', handleUp);
+        window.removeEventListener('mousemove', handleMove);
+        window.removeEventListener('touchend', handleUp);
+        window.removeEventListener('touchmove', handleMove);
+    }
+  }, [isDragging, segment.duration, segment.trimStart, segment.trimEnd]);
+
+  const togglePreviewTrim = () => {
+      if (!audioPreviewRef.current) return;
+      
+      if (isPlayingPreview) {
+          audioPreviewRef.current.pause();
+          setIsPlayingPreview(false);
+      } else {
+          // If playhead is outside trimmed region, reset to start.
+          // Otherwise play from current playhead position to allow resuming.
+          const start = segment.trimStart || 0;
+          const end = segment.trimEnd || segment.duration || 0;
+          
+          if (currentPlayTime < start || currentPlayTime >= end) {
+               audioPreviewRef.current.currentTime = start;
+          }
+          
+          audioPreviewRef.current.play();
+          setIsPlayingPreview(true);
+      }
   };
 
   // Find current preset ID based on voice and speed
@@ -160,13 +352,19 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
                 onChange(segment.id, { 
                     voice: opt.voice, 
                     speed: opt.speed, 
-                    audioBase64: null // Reset audio if voice changes
+                    audioBase64: null 
                 });
                 return;
             }
         }
       }
   };
+
+  // Calculate percentages for ruler
+  const startPct = segment.duration ? ((segment.trimStart || 0) / segment.duration) * 100 : 0;
+  const endPct = segment.duration ? ((segment.trimEnd ?? segment.duration) / segment.duration) * 100 : 100;
+  const widthPct = endPct - startPct;
+  const playheadPct = segment.duration ? (currentPlayTime / segment.duration) * 100 : 0;
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 transition-all hover:shadow-md">
@@ -259,17 +457,123 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
 
             {/* AUDIO FILE INPUT */}
             {segment.inputType === InputType.AUDIO && (
-                <div className="border-2 border-dashed border-slate-300 rounded-lg p-6 text-center hover:bg-slate-50 transition-colors relative h-40 flex flex-col items-center justify-center">
-                    <input 
-                        type="file" 
-                        accept="audio/*" 
-                        onChange={handleAudioFileChange}
-                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                    />
-                     <div className="space-y-2 pointer-events-none">
-                        <Upload className="mx-auto text-slate-400" size={32} />
-                        <p className="text-slate-600 font-medium">{segment.fileName || "Click to upload Audio File (MP3, WAV)"}</p>
+                <div className="space-y-4">
+                    <div className="border-2 border-dashed border-slate-300 rounded-lg p-6 text-center hover:bg-slate-50 transition-colors relative h-32 flex flex-col items-center justify-center">
+                        <input 
+                            type="file" 
+                            accept="audio/*" 
+                            onChange={handleAudioFileChange}
+                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                        />
+                        <div className="space-y-2 pointer-events-none">
+                            <Upload className="mx-auto text-slate-400" size={28} />
+                            <p className="text-slate-600 font-medium">{segment.fileName || "Click to upload Audio File (MP3, WAV)"}</p>
+                        </div>
                     </div>
+
+                    {segment.uploadedAudioURL && segment.duration && (
+                        <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                             <div className="flex items-center justify-between mb-2">
+                                 <span className="text-xs font-bold text-slate-500 uppercase flex items-center gap-1">
+                                     <Scissors size={14} /> Trim Audio
+                                 </span>
+                                 <button 
+                                    onClick={() => setShowTrimmer(!showTrimmer)}
+                                    className="text-xs text-primary-600 hover:underline"
+                                 >
+                                     {showTrimmer ? 'Hide Trimmer' : 'Edit Length'}
+                                 </button>
+                             </div>
+                             
+                             {showTrimmer && (
+                                 <div className="animate-in fade-in slide-in-from-top-2">
+                                     <div className="flex justify-between items-center text-xs text-slate-500 mb-1 font-mono">
+                                         <span>Start: {(segment.trimStart || 0).toFixed(1)}s</span>
+                                         <span className="text-primary-600 font-bold bg-primary-50 px-2 rounded">Current: {currentPlayTime.toFixed(1)}s</span>
+                                         <span>End: {(segment.trimEnd || segment.duration).toFixed(1)}s</span>
+                                     </div>
+                                     
+                                     {/* Ruler Track */}
+                                     <div 
+                                        ref={rulerRef}
+                                        onClick={handleRulerSeek}
+                                        className="relative h-12 bg-slate-200 rounded-md mb-3 select-none touch-none overflow-hidden cursor-crosshair group/ruler"
+                                        title="Click to seek"
+                                     >
+                                         {/* Ticks (Visual) */}
+                                         <div className="absolute inset-0 flex justify-between px-1 opacity-20 pointer-events-none">
+                                             {Array.from({ length: 11 }).map((_, i) => (
+                                                 <div key={i} className="w-px h-full bg-slate-800" />
+                                             ))}
+                                         </div>
+
+                                         {/* Unselected Regions (Dimmed) */}
+                                         <div className="absolute inset-y-0 left-0 bg-slate-800/10 pointer-events-none" style={{ width: `${startPct}%` }} />
+                                         <div className="absolute inset-y-0 right-0 bg-slate-800/10 pointer-events-none" style={{ width: `${100 - endPct}%` }} />
+
+                                         {/* Selected Region */}
+                                         <div 
+                                            className="absolute inset-y-0 bg-primary-500/20 border-x-2 border-primary-500 pointer-events-none"
+                                            style={{ left: `${startPct}%`, width: `${widthPct}%` }}
+                                         />
+
+                                         {/* Playhead (New) */}
+                                         <div 
+                                            className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-30 pointer-events-none transition-all duration-75 ease-linear shadow-[0_0_4px_rgba(255,0,0,0.5)]"
+                                            style={{ left: `${playheadPct}%` }}
+                                         >
+                                             <div className="absolute -top-1 -left-1.5 w-4 h-3 bg-red-500 text-[8px] text-white flex items-center justify-center rounded-sm opacity-0 group-hover/ruler:opacity-100">
+                                                 ▼
+                                             </div>
+                                         </div>
+
+                                         {/* Handles */}
+                                         {/* Start Handle */}
+                                         <div 
+                                            className="absolute top-0 bottom-0 w-6 -ml-3 flex items-center justify-center cursor-ew-resize z-40 group hover:scale-110 transition-transform"
+                                            style={{ left: `${startPct}%` }}
+                                            onMouseDown={(e) => { e.stopPropagation(); setIsDragging('start'); }}
+                                            onTouchStart={(e) => { e.stopPropagation(); setIsDragging('start'); }}
+                                            onClick={(e) => e.stopPropagation()}
+                                         >
+                                             <div className="h-8 w-1.5 bg-primary-600 rounded-full shadow-sm ring-2 ring-white" />
+                                         </div>
+
+                                         {/* End Handle */}
+                                         <div 
+                                            className="absolute top-0 bottom-0 w-6 -ml-3 flex items-center justify-center cursor-ew-resize z-40 group hover:scale-110 transition-transform"
+                                            style={{ left: `${endPct}%` }}
+                                            onMouseDown={(e) => { e.stopPropagation(); setIsDragging('end'); }}
+                                            onTouchStart={(e) => { e.stopPropagation(); setIsDragging('end'); }}
+                                            onClick={(e) => e.stopPropagation()}
+                                         >
+                                             <div className="h-8 w-1.5 bg-primary-600 rounded-full shadow-sm ring-2 ring-white" />
+                                         </div>
+                                     </div>
+
+                                     {/* Preview Controls */}
+                                     <div className="flex gap-2">
+                                         <button 
+                                            onClick={togglePreviewTrim}
+                                            className="flex-1 py-1.5 bg-white border border-slate-300 text-slate-700 rounded text-xs font-semibold hover:bg-slate-50 flex items-center justify-center gap-2"
+                                         >
+                                             {isPlayingPreview ? <Pause size={12} /> : <Play size={12} />}
+                                             {isPlayingPreview ? 'Pause' : 'Test Trim / Play'}
+                                         </button>
+                                         <button 
+                                            onClick={() => onChange(segment.id, { trimStart: 0, trimEnd: segment.duration })}
+                                            className="px-3 py-1.5 bg-white border border-slate-300 text-slate-700 rounded text-xs hover:bg-slate-50"
+                                            title="Reset Trim"
+                                         >
+                                             <RotateCcw size={14} />
+                                         </button>
+                                     </div>
+                                     {/* Hidden Audio Element for Logic */}
+                                     <audio ref={audioPreviewRef} src={audioSrc || undefined} className="hidden" />
+                                 </div>
+                             )}
+                        </div>
+                    )}
                 </div>
             )}
 
@@ -353,23 +657,37 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
                  {audioSrc ? (
                     <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
                         <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Preview Segment</p>
-                        <audio 
-                            controls 
-                            src={audioSrc} 
-                            // Note: We use playbackRate for previewing the speed change in real-time without full processing
-                            // But for merging, we use the resampleAudioBuffer function.
-                            onPlay={(e) => {
-                                if (segment.inputType !== InputType.AUDIO) {
-                                    e.currentTarget.playbackRate = segment.speed; 
-                                }
-                            }}
-                            className="w-full h-8 mb-2"
-                        />
+                        
+                        {/* 
+                           If showing trimmer, we use the trimmer controls. 
+                           If not showing trimmer, we show standard audio controls.
+                        */}
+                        {!showTrimmer && (
+                            <audio 
+                                controls 
+                                src={audioSrc} 
+                                onPlay={(e) => {
+                                    if (segment.inputType !== InputType.AUDIO) {
+                                        e.currentTarget.playbackRate = segment.speed; 
+                                    }
+                                }}
+                                className="w-full h-8 mb-2"
+                            />
+                        )}
+
+                        {showTrimmer && (
+                            <div className="bg-slate-100 p-2 rounded text-center text-xs text-slate-500 italic mb-2">
+                                Use controls above to preview trim
+                            </div>
+                        )}
+
                         <button
                             onClick={handleDownloadSingle}
-                            className="w-full py-1.5 px-3 border border-slate-300 text-slate-600 rounded-md text-xs hover:bg-white hover:text-primary-600 flex items-center justify-center gap-2 transition-colors"
+                            disabled={isProcessingDownload}
+                            className="w-full py-1.5 px-3 border border-slate-300 text-slate-600 rounded-md text-xs hover:bg-white hover:text-primary-600 flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
                         >
-                            <Download size={14} /> Download Segment
+                            {isProcessingDownload ? <Loader2 size={14} className="animate-spin"/> : <Download size={14} />}
+                            Download Segment
                         </button>
                     </div>
                  ) : (
@@ -386,5 +704,10 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
     </div>
   );
 };
+
+// Simple icon for Reset
+const RotateCcw: React.FC<{size?:number}> = ({size=16}) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 12"/><path d="M3 5v7h7"/></svg>
+);
 
 export default SegmentItem;

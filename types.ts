@@ -13,6 +13,15 @@ export enum VoiceName {
   Zephyr = 'Zephyr' // Female, Soprano
 }
 
+export interface VoicePersona {
+  id: string;
+  name: string;
+  baseVoice: string;
+  playbackRate: number;
+  gender: string;
+  ageGroup: string;
+}
+
 export interface Segment {
   id: string;
   inputType: InputType;
@@ -29,6 +38,11 @@ export interface Segment {
   audioBase64: string | null; // Raw PCM (from Gemini) or Base64 encoded file (from Upload)
   uploadedAudioURL?: string; // For playing back uploaded files directly
   
+  // Audio Trimming
+  duration?: number; // Total duration in seconds
+  trimStart?: number; // Start time in seconds
+  trimEnd?: number; // End time in seconds
+
   // Configuration
   voice: VoiceName;
   speed: number; // 1.0 = Normal, >1.0 = Younger/Faster, <1.0 = Older/Slower

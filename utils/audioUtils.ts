@@ -1,4 +1,5 @@
 
+
 /**
  * Helper to convert base64 string to Uint8Array
  */
@@ -73,7 +74,7 @@ export const decodeRawPCM = async (
 };
 
 /**
- * Resamples an audio buffer to change pitch/speed.
+ * Resamples an audio buffer to change pitch/speed (Chipmunk effect).
  * Used to create Child/Elder voices from standard voices.
  */
 export const resampleAudioBuffer = async (
@@ -82,7 +83,6 @@ export const resampleAudioBuffer = async (
 ): Promise<AudioBuffer> => {
     if (speed === 1.0) return buffer;
 
-    // We use OfflineAudioContext to render the audio at a new speed
     const newDuration = buffer.duration / speed;
     const offlineCtx = new OfflineAudioContext(
         buffer.numberOfChannels,
@@ -100,6 +100,75 @@ export const resampleAudioBuffer = async (
 };
 
 /**
+ * Converts the sample rate of a buffer to a target rate without changing pitch.
+ * Used for normalizing uploaded files (e.g. 44.1k) to app standard (24k).
+ */
+export const convertSampleRate = async (
+    buffer: AudioBuffer, 
+    targetRate: number
+): Promise<AudioBuffer> => {
+    if (buffer.sampleRate === targetRate) return buffer;
+
+    const offlineCtx = new OfflineAudioContext(
+        buffer.numberOfChannels,
+        buffer.duration * targetRate,
+        targetRate
+    );
+
+    const source = offlineCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(offlineCtx.destination);
+    source.start(0);
+
+    return await offlineCtx.startRendering();
+};
+
+/**
+ * Trims an AudioBuffer to the specified start and end times.
+ */
+export const trimAudioBuffer = (
+    buffer: AudioBuffer,
+    startTime: number,
+    endTime: number
+): AudioBuffer => {
+    // Validate range
+    if (startTime < 0) startTime = 0;
+    if (endTime > buffer.duration) endTime = buffer.duration;
+    if (startTime >= endTime) {
+        // Return empty buffer if invalid
+        const ctx = new OfflineAudioContext(1, 1, buffer.sampleRate);
+        return ctx.createBuffer(1, 1, buffer.sampleRate);
+    }
+
+    const sampleRate = buffer.sampleRate;
+    const startFrame = Math.floor(startTime * sampleRate);
+    const endFrame = Math.floor(endTime * sampleRate);
+    const frameCount = endFrame - startFrame;
+
+    // We can't use OfflineAudioContext to create a buffer without rendering, 
+    // but we can use a temporary AudioContext just to create the container, 
+    // or just copy raw data if we want to be pure.
+    // Simplest approach: Create a new AudioBuffer (supported in modern browsers)
+    
+    const newBuffer = new AudioBuffer({
+        length: frameCount,
+        numberOfChannels: buffer.numberOfChannels,
+        sampleRate: sampleRate
+    });
+
+    for (let i = 0; i < buffer.numberOfChannels; i++) {
+        const inputData = buffer.getChannelData(i);
+        const outputData = newBuffer.getChannelData(i);
+        // Copy the slice
+        for (let j = 0; j < frameCount; j++) {
+            outputData[j] = inputData[startFrame + j];
+        }
+    }
+
+    return newBuffer;
+};
+
+/**
  * Merges multiple AudioBuffers with individual delays.
  */
 export const mergeAudioBuffers = (
@@ -110,8 +179,7 @@ export const mergeAudioBuffers = (
   let totalLength = 0;
   items.forEach((item, index) => {
     totalLength += item.buffer.length;
-    // Add delay after segment, unless it's the very last one (optional, usually good to have trailing silence or just between)
-    // Here we add delay AFTER each segment as requested
+    // Add delay after segment
     const delaySamples = Math.floor(item.delay * audioContext.sampleRate);
     totalLength += delaySamples;
   });
@@ -131,7 +199,6 @@ export const mergeAudioBuffers = (
   // 3. Merge
   let offset = 0;
   for (const item of items) {
-    // Handle channel data (mix down to mono if needed, or just take ch 0)
     const inputData = item.buffer.getChannelData(0); // Take first channel
     
     // Copy data
@@ -139,7 +206,6 @@ export const mergeAudioBuffers = (
     offset += inputData.length;
 
     // Add silence (delay)
-    // Data is already 0 initialized, just move offset
     const delaySamples = Math.floor(item.delay * audioContext.sampleRate);
     offset += delaySamples;
   }
