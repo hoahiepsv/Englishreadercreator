@@ -4,7 +4,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { Segment, InputType, VoiceName } from './types';
 import SegmentItem from './components/SegmentItem';
-import { Plus, Download, Play, Layers, AlertCircle, Loader2, RotateCcw } from 'lucide-react';
+import { Plus, Download, Play, Layers, AlertCircle, Loader2, RotateCcw, Key, Save, Edit2 } from 'lucide-react';
 import { decodeRawPCM, mergeAudioBuffers, bufferToWav, resampleAudioBuffer, convertSampleRate, trimAudioBuffer } from './utils/audioUtils';
 
 const App: React.FC = () => {
@@ -25,6 +25,30 @@ const App: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  // API Key State
+  const [apiKey, setApiKey] = useState<string>('');
+  const [isApiKeySaved, setIsApiKeySaved] = useState<boolean>(false);
+
+  // Load API Key from local storage on mount
+  useEffect(() => {
+    const storedKey = localStorage.getItem('user_gemini_api_key');
+    if (storedKey) {
+        setApiKey(storedKey);
+        setIsApiKeySaved(true);
+    }
+  }, []);
+
+  const handleSaveApiKey = () => {
+      if(apiKey.trim()) {
+          localStorage.setItem('user_gemini_api_key', apiKey.trim());
+          setIsApiKeySaved(true);
+      }
+  };
+
+  const handleEditApiKey = () => {
+      setIsApiKeySaved(false);
+  };
 
   // Invalidate preview when segments change
   const handleSegmentChange = (id: string, updates: Partial<Segment>) => {
@@ -151,12 +175,54 @@ const App: React.FC = () => {
                     <p className="text-white text-[10px] mt-0.5 opacity-80 font-mono">Create by Lê Hòa Hiệp - 0983.676.470</p>
                 </div>
             </div>
-            <div className="hidden md:block text-right bg-primary-700/30 px-4 py-2 rounded-lg border border-primary-500/30">
-                <p className="text-xs font-bold text-primary-200">LICENSED TO</p>
-                <p className="text-sm font-bold text-white">Lê Hòa Hiệp</p>
+            
+            <div className="flex items-center gap-4">
+                 {/* Show Edit button if key is saved */}
+                 {isApiKeySaved && (
+                     <button 
+                        onClick={handleEditApiKey}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-primary-700/50 hover:bg-primary-700 text-xs font-medium rounded-md border border-primary-500/30 transition-colors"
+                     >
+                         <Edit2 size={14} /> Edit API Key
+                     </button>
+                 )}
+
+                <div className="hidden md:block text-right bg-primary-700/30 px-4 py-2 rounded-lg border border-primary-500/30">
+                    <p className="text-xs font-bold text-primary-200">LICENSED TO</p>
+                    <p className="text-sm font-bold text-white">Lê Hòa Hiệp</p>
+                </div>
             </div>
         </div>
       </header>
+
+      {/* API Key Banner (If not saved) */}
+      {!isApiKeySaved && (
+          <div className="bg-white border-b border-primary-200 shadow-sm p-4 animate-in slide-in-from-top-4">
+              <div className="container mx-auto max-w-4xl flex flex-col md:flex-row items-center gap-4">
+                  <div className="bg-primary-50 p-3 rounded-full text-primary-600 hidden md:block">
+                      <Key size={24} />
+                  </div>
+                  <div className="flex-grow w-full">
+                      <h3 className="text-sm font-bold text-slate-800 mb-1">Enter your Gemini API Key</h3>
+                      <p className="text-xs text-slate-500 mb-2">Required for Text-to-Speech and OCR. Key is saved locally in your browser.</p>
+                      <input 
+                          type="password" 
+                          placeholder="Paste your API Key here..." 
+                          value={apiKey}
+                          onChange={(e) => setApiKey(e.target.value)}
+                          className="w-full p-2 border border-slate-300 rounded-md focus:ring-2 focus:ring-primary-500 outline-none text-sm"
+                      />
+                  </div>
+                  <button 
+                    onClick={handleSaveApiKey}
+                    disabled={!apiKey.trim()}
+                    className="w-full md:w-auto px-6 py-2.5 bg-primary-600 text-white rounded-lg font-bold hover:bg-primary-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                      <Save size={18} /> Save API Key
+                  </button>
+              </div>
+          </div>
+      )}
 
       {/* Main Content */}
       <main className="flex-grow container mx-auto px-4 py-8 max-w-4xl">
@@ -188,6 +254,7 @@ const App: React.FC = () => {
                     segment={seg} 
                     onChange={handleSegmentChange} 
                     onRemove={handleRemoveSegment}
+                    apiKey={apiKey}
                 />
             ))}
 
