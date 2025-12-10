@@ -1,0 +1,5 @@
+{
+  "name": "English Reader Creator",
+  "description": "A professional tool to convert text, PDFs, and images into high-quality English speech using Gemini AI. Supports multi-voice segments and audio merging.",
+  "requestFramePermissions": []
+}
