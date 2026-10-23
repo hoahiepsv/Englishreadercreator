@@ -2,13 +2,17 @@
 import React, { useMemo, useEffect, useState, useRef } from 'react';
 import { Segment, InputType, VoiceName } from '../types';
 import { extractTextFromMedia, generateSpeech } from '../services/geminiService';
-import { Trash2, FileText, Type, Upload, Music, Loader2, Download, PlayCircle, Clock, Scissors, Pause, Play, RotateCcw } from 'lucide-react';
-import { base64ToUint8Array, createWavHeader, decodeRawPCM, resampleAudioBuffer, bufferToWav, trimAudioBuffer } from '../utils/audioUtils';
+import { Trash2, FileText, Type, Upload, Music, Loader2, Download, PlayCircle, Clock, Scissors, Pause, Play, RotateCcw, ArrowUp, ArrowDown } from 'lucide-react';
+import { base64ToUint8Array, createWavHeader, decodeRawPCM, resampleAudioBuffer, bufferToWav, trimAudioBuffer, cleanAndNormalizeAudio } from '../utils/audioUtils';
 
 interface SegmentItemProps {
   segment: Segment;
   onChange: (id: string, updates: Partial<Segment>) => void;
   onRemove: (id: string) => void;
+  onMoveUp?: () => void;
+  onMoveDown?: () => void;
+  isFirst?: boolean;
+  isLast?: boolean;
   index: number;
   apiKey: string; // Add apiKey prop
 }
@@ -36,7 +40,7 @@ const VOICE_PRESETS = [
     ]}
 ];
 
-const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, index, apiKey }) => {
+const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, onMoveUp, onMoveDown, isFirst, isLast, index, apiKey }) => {
   const [isProcessingDownload, setIsProcessingDownload] = useState(false);
   const [showTrimmer, setShowTrimmer] = useState(false);
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
@@ -56,12 +60,9 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
 
     if (segment.audioBase64) {
         try {
-            const pcmData = base64ToUint8Array(segment.audioBase64);
-            const header = createWavHeader(pcmData.length);
-            const wavData = new Uint8Array(header.length + pcmData.length);
-            wavData.set(header);
-            wavData.set(pcmData, header.length);
-            const blob = new Blob([wavData], { type: 'audio/wav' });
+            const cleanBase64 = cleanAndNormalizeAudio(segment.audioBase64);
+            const wavBytes = base64ToUint8Array(cleanBase64);
+            const blob = new Blob([wavBytes], { type: 'audio/wav' });
             return URL.createObjectURL(blob);
         } catch (e) {
             console.error("Error creating audio blob", e);
@@ -251,13 +252,8 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
   };
 
   const handleGenerateAudio = async () => {
-    if (!apiKey) {
-        onChange(segment.id, { error: "Please enter your API Key at the top of the page first." });
-        return;
-    }
-
     if (!segment.textRaw.trim()) {
-        onChange(segment.id, { error: "Please enter some text first." });
+        onChange(segment.id, { error: "Please enter some text in the white text box first." });
         return;
     }
 
@@ -454,17 +450,43 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 transition-all hover:shadow-md">
-      <div className="flex justify-between items-start mb-4">
-        <h3 className="text-lg font-semibold text-primary-700 flex items-center gap-2">
-            <span className="bg-primary-100 text-primary-800 text-xs font-bold px-2 py-1 rounded-full">#{index + 1}</span>
-            Segment
-        </h3>
+      <div className="flex justify-between items-center mb-4 pb-3 border-b border-slate-100">
+        <div className="flex items-center gap-3">
+            <h3 className="text-lg font-bold text-primary-700 flex items-center gap-2">
+                <span className="bg-primary-100 text-primary-800 text-xs font-bold px-2.5 py-1 rounded-full">#{index + 1}</span>
+                Segment
+            </h3>
+
+            {/* Reorder Up / Down buttons */}
+            <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+                <button
+                    type="button"
+                    onClick={onMoveUp}
+                    disabled={isFirst}
+                    className="p-1 rounded text-slate-600 hover:text-primary-700 hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-slate-600 transition-all"
+                    title={isFirst ? "Đang ở vị trí đầu tiên" : "Di chuyển phân đoạn lên trên"}
+                >
+                    <ArrowUp size={16} />
+                </button>
+                <div className="w-[1px] h-3.5 bg-slate-300" />
+                <button
+                    type="button"
+                    onClick={onMoveDown}
+                    disabled={isLast}
+                    className="p-1 rounded text-slate-600 hover:text-primary-700 hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-slate-600 transition-all"
+                    title={isLast ? "Đang ở vị trí cuối cùng" : "Di chuyển phân đoạn xuống dưới"}
+                >
+                    <ArrowDown size={16} />
+                </button>
+            </div>
+        </div>
+
         <button 
             onClick={() => onRemove(segment.id)}
-            className="text-slate-400 hover:text-red-500 transition-colors p-1"
-            title="Remove segment"
+            className="text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors p-1.5 rounded-lg"
+            title="Xóa phân đoạn này"
         >
-            <Trash2 size={20} />
+            <Trash2 size={18} />
         </button>
       </div>
 
@@ -508,12 +530,36 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
             
             {/* TEXT INPUT */}
             {segment.inputType === InputType.TEXT && (
-                <textarea
-                    className="w-full h-40 p-4 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none resize-none bg-white text-black font-medium leading-relaxed"
-                    placeholder="Enter English text here..."
-                    value={segment.textRaw}
-                    onChange={(e) => onChange(segment.id, { textRaw: e.target.value })}
-                />
+                <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                        <label className="text-xs font-bold text-slate-700 uppercase tracking-wide">
+                            English Text
+                        </label>
+                        <div className="flex items-center gap-3">
+                            <span className="text-[11px] font-medium text-slate-400">
+                                {segment.textRaw.trim() ? segment.textRaw.trim().split(/\s+/).filter(Boolean).length : 0} words · {segment.textRaw.length} chars
+                            </span>
+                            {segment.textRaw && (
+                                <button
+                                    type="button"
+                                    onClick={() => onChange(segment.id, { textRaw: '', audioBase64: null })}
+                                    className="text-xs text-red-500 hover:text-red-700 font-medium hover:underline cursor-pointer"
+                                    title="Xóa sạch nội dung trong box"
+                                >
+                                    ✕ Xóa sạch
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                    <div className="relative">
+                        <textarea
+                            className="w-full h-44 p-4 border border-slate-300 rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none resize-y bg-white text-slate-900 font-sans text-base leading-relaxed shadow-sm transition-all placeholder:text-slate-400"
+                            placeholder="Nhập hoặc dán văn bản tiếng Anh vào đây..."
+                            value={segment.textRaw}
+                            onChange={(e) => onChange(segment.id, { textRaw: e.target.value })}
+                        />
+                    </div>
+                </div>
             )}
 
             {/* OCR FILE INPUT */}
@@ -725,16 +771,15 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
                 {segment.inputType !== InputType.AUDIO && (
                     <button
                         onClick={handleGenerateAudio}
-                        disabled={segment.isGeneratingAudio || !segment.textRaw || !apiKey}
-                        title={!apiKey ? "Enter API Key first" : ""}
-                        className="w-full py-2.5 px-4 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-sm transition-all active:scale-95"
+                        disabled={segment.isGeneratingAudio || !segment.textRaw.trim()}
+                        className="w-full py-2.5 px-4 bg-primary-600 text-white rounded-lg font-bold hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-sm transition-all active:scale-95"
                     >
                         {segment.isGeneratingAudio ? (
                             <Loader2 className="animate-spin" size={18} />
                         ) : (
                             <PlayCircle size={18} />
                         )}
-                        {segment.isGeneratingAudio ? 'Generating...' : 'Generate Voice'}
+                        {segment.isGeneratingAudio ? 'Generating Voice...' : 'Generate Voice'}
                     </button>
                 )}
             </div>
@@ -795,9 +840,5 @@ const SegmentItem: React.FC<SegmentItemProps> = ({ segment, onChange, onRemove, 
   );
 };
 
-// Simple icon for Reset
-const RotateCcw: React.FC<{size?:number}> = ({size=16}) => (
-    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 12"/><path d="M3 5v7h7"/></svg>
-);
-
 export default SegmentItem;
+
